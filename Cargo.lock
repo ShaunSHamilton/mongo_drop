@@ -908,6 +908,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mongo_drop"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "mongodb",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mongodb"
 version = "3.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -966,16 +976,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.101",
-]
-
-[[package]]
-name = "mongodb_drop"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "mongodb",
- "tokio",
- "tracing",
 ]
 
 [[package]]

@@ -1,10 +1,20 @@
 [package]
-name = "mongodb_drop"
+name = "mongo_drop"
 version = "0.1.0"
 edition = "2024"
+authors = ["Shaun Hamilton <shauhami020@gmail.com>"]
+description = "An RAII to rollback MongoDB transactions on drop"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/ShaunSHamilton/mongo_drop/"
+categories = ["asynchronous", "database", "development-tools::testing"]
+keywords = ["mongodb", "drop", "rollback", "transaction"]
 
 [dependencies]
 futures-util = "0.3.31"
 mongodb = "3.2.3"
 tokio = { version = "1.45.0", features = ["full"] }
-tracing = "0.1.41"
+tracing = { version = "0.1.41", optional = true }
+
+[features]
+tracing = ["dep:tracing"]
