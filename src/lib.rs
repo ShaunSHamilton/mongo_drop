@@ -122,188 +122,182 @@ impl MongoDrop {
 // Implement the experimental AsyncDrop trait
 impl AsyncDrop for MongoDrop {
     // The future returned by async_drop
-    type Dropper<'a> = impl std::future::Future<Output = ()> + 'a; // Use impl Trait for the future type
 
     // The async method that will be awaited on drop
-    fn async_drop(self: Pin<&mut Self>) -> Self::Dropper<'_> {
+    async fn drop(self: Pin<&mut Self>) {
         // Need to move self out of the Pin to consume it. This requires unsafe,
         // but is the standard way to handle consuming `self` in `async_drop`.
         // Safety: We are consuming the struct `self` here. The future returned
         // must complete before the memory is reused. AsyncDrop ensures this.
         let this = unsafe { Pin::into_inner_unchecked(self) };
 
-        async move {
-            #[cfg(feature = "tracing")]
-            tracing::info!("Executing async_drop for MongoDrop...");
+        #[cfg(feature = "tracing")]
+        tracing::info!("Executing async_drop for MongoDrop...");
 
-            // Signal the listener task to stop collecting new events
-            // Ignore send error if receiver is already dropped
-            if let Some(sender) = this.stop_sender.take() {
-                if let Err(_) = sender.send(()) {
-                    #[cfg(feature = "tracing")]
-                    tracing::info!("Failed to send stop signal to change stream listener.");
+        // Signal the listener task to stop collecting new events
+        // Ignore send error if receiver is already dropped
+        if let Some(sender) = this.stop_sender.take() {
+            if let Err(_) = sender.send(()) {
+                #[cfg(feature = "tracing")]
+                tracing::info!("Failed to send stop signal to change stream listener.");
+            }
+        } else {
+            #[cfg(feature = "tracing")]
+            tracing::info!("Stop signal already sent or listener not initialized.");
+        }
+        // Wait briefly for the listener to potentially process the last few events
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Take ownership of the collected events
+        let events_to_process = {
+            let mut events = this.collected_events.lock().unwrap();
+            events.drain(..).collect::<Vec<_>>()
+        };
+
+        if events_to_process.is_empty() {
+            #[cfg(feature = "tracing")]
+            tracing::info!("No changes collected to undo in async_drop.");
+            // Optionally wait for the listener task to finish explicitly here
+            // this._listener_handle.await.ok();
+            return; // Return from the async block (Future output is ())
+        }
+
+        #[cfg(feature = "tracing")]
+        tracing::info!("Starting MongoDB rollback via async_drop...");
+
+        for event in events_to_process.into_iter() {
+            #[cfg(feature = "tracing")]
+            tracing::info!("Undoing change event: {:?}", event.operation_type);
+            match event.operation_type {
+                OperationType::Insert => {
+                    if let Some(document_key) = event.document_key {
+                        if let Some(id) = document_key.get("_id") {
+                            let filter = doc! { "_id": id.clone() };
+                            #[cfg(feature = "tracing")]
+                            tracing::info!("Undoing Insert: Deleting document with _id: {:?}", id);
+                            let collection = this
+                                .database
+                                .collection::<Document>(event.ns.unwrap().coll.unwrap().as_str());
+                            if let Err(_e) = collection.delete_one(filter).await {
+                                #[cfg(feature = "tracing")]
+                                tracing::error!("Error undoing Insert: {:?}", _e);
+                            }
+                        } else {
+                            #[cfg(feature = "tracing")]
+                            tracing::info!(
+                                "Insert event missing _id in document_key, cannot undo."
+                            );
+                        }
+                    } else {
+                        #[cfg(feature = "tracing")]
+                        tracing::info!("Insert event with no document_key, cannot undo.");
+                    }
                 }
-            } else {
-                #[cfg(feature = "tracing")]
-                tracing::info!("Stop signal already sent or listener not initialized.");
-            }
-            // Wait briefly for the listener to potentially process the last few events
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-            // Take ownership of the collected events
-            let events_to_process = {
-                let mut events = this.collected_events.lock().unwrap();
-                events.drain(..).collect::<Vec<_>>()
-            };
-
-            if events_to_process.is_empty() {
-                #[cfg(feature = "tracing")]
-                tracing::info!("No changes collected to undo in async_drop.");
-                // Optionally wait for the listener task to finish explicitly here
-                // this._listener_handle.await.ok();
-                return; // Return from the async block (Future output is ())
-            }
-
-            #[cfg(feature = "tracing")]
-            tracing::info!("Starting MongoDB rollback via async_drop...");
-
-            for event in events_to_process.into_iter() {
-                #[cfg(feature = "tracing")]
-                tracing::info!("Undoing change event: {:?}", event.operation_type);
-                match event.operation_type {
-                    OperationType::Insert => {
-                        if let Some(document_key) = event.document_key {
+                OperationType::Delete => {
+                    if let Some(full_document) = event.full_document_before_change {
+                        #[cfg(feature = "tracing")]
+                        tracing::info!("Undoing Delete: Re-inserting document.");
+                        let collection = this
+                            .database
+                            .collection::<Document>(event.ns.unwrap().coll.unwrap().as_str());
+                        if let Err(_e) = collection.insert_one(full_document).await {
+                            #[cfg(feature = "tracing")]
+                            tracing::error!("Error undoing Delete: {:?}", _e);
+                        }
+                    } else {
+                        #[cfg(feature = "tracing")]
+                        tracing::info!(
+                            "Delete event missing fullDocumentBeforeChange, cannot fully undo delete."
+                        );
+                        if let Some(_document_key) = event.document_key {
+                            #[cfg(feature = "tracing")]
+                            tracing::info!(
+                                "Document key for un-undoable delete: {:?}",
+                                _document_key
+                            );
+                        }
+                    }
+                }
+                OperationType::Update => {
+                    if let Some(document_key) = event.document_key {
+                        if let Some(full_document_before) = event.full_document_before_change {
                             if let Some(id) = document_key.get("_id") {
                                 let filter = doc! { "_id": id.clone() };
                                 #[cfg(feature = "tracing")]
                                 tracing::info!(
-                                    "Undoing Insert: Deleting document with _id: {:?}",
+                                    "Undoing Update: Replacing document with pre-update state for _id: {:?}",
                                     id
                                 );
                                 let collection = this.database.collection::<Document>(
                                     event.ns.unwrap().coll.unwrap().as_str(),
                                 );
-                                if let Err(_e) = collection.delete_one(filter).await {
+                                if let Err(_e) =
+                                    collection.replace_one(filter, full_document_before).await
+                                {
                                     #[cfg(feature = "tracing")]
-                                    tracing::error!("Error undoing Insert: {:?}", _e);
+                                    tracing::error!("Error undoing Update: {:?}", _e);
                                 }
                             } else {
                                 #[cfg(feature = "tracing")]
                                 tracing::info!(
-                                    "Insert event missing _id in document_key, cannot undo."
+                                    "Update event missing _id in document_key, cannot undo."
                                 );
-                            }
-                        } else {
-                            #[cfg(feature = "tracing")]
-                            tracing::info!("Insert event with no document_key, cannot undo.");
-                        }
-                    }
-                    OperationType::Delete => {
-                        if let Some(full_document) = event.full_document_before_change {
-                            #[cfg(feature = "tracing")]
-                            tracing::info!("Undoing Delete: Re-inserting document.");
-                            let collection = this
-                                .database
-                                .collection::<Document>(event.ns.unwrap().coll.unwrap().as_str());
-                            if let Err(_e) = collection.insert_one(full_document).await {
-                                #[cfg(feature = "tracing")]
-                                tracing::error!("Error undoing Delete: {:?}", _e);
                             }
                         } else {
                             #[cfg(feature = "tracing")]
                             tracing::info!(
-                                "Delete event missing fullDocumentBeforeChange, cannot fully undo delete."
+                                "Update event missing fullDocumentBeforeChange, cannot fully undo update for key: {:?}",
+                                document_key
                             );
-                            if let Some(_document_key) = event.document_key {
-                                #[cfg(feature = "tracing")]
-                                tracing::info!(
-                                    "Document key for un-undoable delete: {:?}",
-                                    _document_key
-                                );
-                            }
                         }
-                    }
-                    OperationType::Update => {
-                        if let Some(document_key) = event.document_key {
-                            if let Some(full_document_before) = event.full_document_before_change {
-                                if let Some(id) = document_key.get("_id") {
-                                    let filter = doc! { "_id": id.clone() };
-                                    #[cfg(feature = "tracing")]
-                                    tracing::info!(
-                                        "Undoing Update: Replacing document with pre-update state for _id: {:?}",
-                                        id
-                                    );
-                                    let collection = this.database.collection::<Document>(
-                                        event.ns.unwrap().coll.unwrap().as_str(),
-                                    );
-                                    if let Err(_e) =
-                                        collection.replace_one(filter, full_document_before).await
-                                    {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::error!("Error undoing Update: {:?}", _e);
-                                    }
-                                } else {
-                                    #[cfg(feature = "tracing")]
-                                    tracing::info!(
-                                        "Update event missing _id in document_key, cannot undo."
-                                    );
-                                }
-                            } else {
-                                #[cfg(feature = "tracing")]
-                                tracing::info!(
-                                    "Update event missing fullDocumentBeforeChange, cannot fully undo update for key: {:?}",
-                                    document_key
-                                );
-                            }
-                        } else {
-                            #[cfg(feature = "tracing")]
-                            tracing::info!("Update event with no document_key, cannot undo.");
-                        }
-                    }
-                    OperationType::Replace => {
-                        if let Some(document_key) = event.document_key {
-                            if let Some(full_document_before) = event.full_document_before_change {
-                                if let Some(id) = document_key.get("_id") {
-                                    let filter = doc! { "_id": id.clone() };
-                                    #[cfg(feature = "tracing")]
-                                    tracing::info!(
-                                        "Undoing Replace: Replacing document with pre-replace state for _id: {:?}",
-                                        id
-                                    );
-                                    let collection = this.database.collection::<Document>(
-                                        event.ns.unwrap().coll.unwrap().as_str(),
-                                    );
-                                    if let Err(_e) =
-                                        collection.replace_one(filter, full_document_before).await
-                                    {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::error!("Error undoing Replace: {:?}", _e);
-                                    }
-                                } else {
-                                    #[cfg(feature = "tracing")]
-                                    tracing::info!(
-                                        "Replace event missing _id in document_key, cannot undo."
-                                    );
-                                }
-                            } else {
-                                #[cfg(feature = "tracing")]
-                                tracing::info!(
-                                    "Replace event missing fullDocumentBeforeChange, cannot fully undo replace for key: {:?}",
-                                    document_key
-                                );
-                            }
-                        } else {
-                            #[cfg(feature = "tracing")]
-                            tracing::info!("Replace event with no document_key, cannot undo.");
-                        }
-                    }
-                    _op_type => {
+                    } else {
                         #[cfg(feature = "tracing")]
-                        tracing::info!(
-                            "Unhandled change stream operation type during async_drop: {:?}",
-                            _op_type
-                        );
+                        tracing::info!("Update event with no document_key, cannot undo.");
                     }
+                }
+                OperationType::Replace => {
+                    if let Some(document_key) = event.document_key {
+                        if let Some(full_document_before) = event.full_document_before_change {
+                            if let Some(id) = document_key.get("_id") {
+                                let filter = doc! { "_id": id.clone() };
+                                #[cfg(feature = "tracing")]
+                                tracing::info!(
+                                    "Undoing Replace: Replacing document with pre-replace state for _id: {:?}",
+                                    id
+                                );
+                                let collection = this.database.collection::<Document>(
+                                    event.ns.unwrap().coll.unwrap().as_str(),
+                                );
+                                if let Err(_e) =
+                                    collection.replace_one(filter, full_document_before).await
+                                {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::error!("Error undoing Replace: {:?}", _e);
+                                }
+                            } else {
+                                #[cfg(feature = "tracing")]
+                                tracing::info!(
+                                    "Replace event missing _id in document_key, cannot undo."
+                                );
+                            }
+                        } else {
+                            #[cfg(feature = "tracing")]
+                            tracing::info!(
+                                "Replace event missing fullDocumentBeforeChange, cannot fully undo replace for key: {:?}",
+                                document_key
+                            );
+                        }
+                    } else {
+                        #[cfg(feature = "tracing")]
+                        tracing::info!("Replace event with no document_key, cannot undo.");
+                    }
+                }
+                _op_type => {
+                    #[cfg(feature = "tracing")]
+                    tracing::info!(
+                        "Unhandled change stream operation type during async_drop: {:?}",
+                        _op_type
+                    );
                 }
             }
             #[cfg(feature = "tracing")]
