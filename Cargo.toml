@@ -1,6 +1,6 @@
 [package]
 name = "mongo_drop"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Shaun Hamilton <shauhami020@gmail.com>"]
 description = "An RAII to rollback MongoDB transactions on drop"

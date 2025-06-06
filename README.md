@@ -38,8 +38,6 @@ mod tests {
 
 - `tracing`: Enables tracing support for the library.
 
-##
-
 - **Automatic Rollback:** Leverages `AsyncDrop` to undo database changes automatically when the guard goes out of scope in an `async` function.
 - **Change Stream Based:** Listens to MongoDB change streams to capture modification events.
 - **Supports DML Rollback:** Undoes `Insert`, `Update`, `Delete`, and `Replace` operations using collected pre-images.
