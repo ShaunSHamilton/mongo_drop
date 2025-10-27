@@ -31,6 +31,7 @@
 //! }
 //! ```
 
+#![allow(incomplete_features)]
 #![feature(async_drop, impl_trait_in_assoc_type)]
 
 use futures_util::stream::StreamExt;
@@ -56,6 +57,9 @@ pub struct MongoDrop {
     stop_sender: Option<oneshot::Sender<()>>,
     _listener_handle: JoinHandle<()>, // Keep handle to the spawned task
 }
+
+// Explicitly implement Unpin to allow get_mut() in AsyncDrop
+impl Unpin for MongoDrop {}
 
 impl MongoDrop {
     /// Initializes the change stream listener.
@@ -121,18 +125,13 @@ impl MongoDrop {
 
 // Implement the experimental AsyncDrop trait
 impl AsyncDrop for MongoDrop {
-    // The future returned by async_drop
-
     // The async method that will be awaited on drop
     async fn drop(self: Pin<&mut Self>) {
-        // Need to move self out of the Pin to consume it. This requires unsafe,
-        // but is the standard way to handle consuming `self` in `async_drop`.
-        // Safety: We are consuming the struct `self` here. The future returned
-        // must complete before the memory is reused. AsyncDrop ensures this.
-        let this = unsafe { Pin::into_inner_unchecked(self) };
-
         #[cfg(feature = "tracing")]
         tracing::info!("Executing async_drop for MongoDrop...");
+
+        // Get a mutable reference to the struct without taking ownership
+        let this = self.get_mut();
 
         // Signal the listener task to stop collecting new events
         // Ignore send error if receiver is already dropped
@@ -145,6 +144,7 @@ impl AsyncDrop for MongoDrop {
             #[cfg(feature = "tracing")]
             tracing::info!("Stop signal already sent or listener not initialized.");
         }
+
         // Wait briefly for the listener to potentially process the last few events
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -157,9 +157,7 @@ impl AsyncDrop for MongoDrop {
         if events_to_process.is_empty() {
             #[cfg(feature = "tracing")]
             tracing::info!("No changes collected to undo in async_drop.");
-            // Optionally wait for the listener task to finish explicitly here
-            // this._listener_handle.await.ok();
-            return; // Return from the async block (Future output is ())
+            return;
         }
 
         #[cfg(feature = "tracing")]
@@ -300,8 +298,34 @@ impl AsyncDrop for MongoDrop {
                     );
                 }
             }
-            #[cfg(feature = "tracing")]
-            tracing::info!("MongoDB rollback via async_drop finished.");
         }
+
+        #[cfg(feature = "tracing")]
+        tracing::info!("MongoDB rollback via async_drop finished.");
+    }
+}
+
+impl Drop for MongoDrop {
+    fn drop(&mut self) {
+        #[cfg(feature = "tracing")]
+        tracing::info!("Executing sync drop for MongoDrop - stopping change stream listener");
+
+        // Signal the listener task to stop collecting new events
+        // This is a best-effort cleanup - we can't perform async rollback in sync Drop
+        // Check if stop_sender is still available (might have been taken by AsyncDrop)
+        if let Some(sender) = self.stop_sender.take() {
+            if let Err(_) = sender.send(()) {
+                #[cfg(feature = "tracing")]
+                tracing::info!("Failed to send stop signal to change stream listener in sync drop");
+            }
+        } else {
+            #[cfg(feature = "tracing")]
+            tracing::info!("Stop signal already sent (possibly by AsyncDrop)");
+        }
+
+        #[cfg(feature = "tracing")]
+        tracing::warn!(
+            "MongoDrop dropped in sync context - database changes will NOT be rolled back. Use in async context for automatic rollback."
+        );
     }
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.0] - 2025-10-27
+
+### Changed
+
+- impl of `AsyncDrop` now uses `drop`
+
 ## [0.1.1] - 2025-06-06
 
 ### Fixed

@@ -1,9 +1,12 @@
+#![allow(incomplete_features)]
+#![feature(async_drop)]
 use mongo_drop::MongoDrop;
 use mongodb::{
     Client,
     bson::{Document, doc},
 };
 
+// #[tracing_test::traced_test]
 #[tokio::test]
 async fn asyncdrop() -> Result<(), Box<dyn std::error::Error>> {
     let mongodb_client = get_client().await?;

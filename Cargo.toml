@@ -1,6 +1,6 @@
 [package]
 name = "mongo_drop"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 authors = ["Shaun Hamilton <shauhami020@gmail.com>"]
 description = "An RAII to rollback MongoDB transactions on drop"
@@ -12,9 +12,12 @@ keywords = ["mongodb", "drop", "rollback", "transaction"]
 
 [dependencies]
 futures-util = "0.3.31"
-mongodb = "3.2.3"
-tokio = { version = "1.45.0", features = ["full"] }
+mongodb = "3.3.0"
+tokio = { version = "1.48.0", features = ["full"] }
 tracing = { version = "0.1.41", optional = true }
 
 [features]
 tracing = ["dep:tracing"]
+
+[dev-dependencies]
+tracing-test = { version = "0.2.5", features = ["no-env-filter"] }
