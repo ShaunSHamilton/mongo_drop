@@ -20,4 +20,4 @@ tracing = { version = "0.1.41", optional = true }
 tracing = ["dep:tracing"]
 
 [dev-dependencies]
-tracing-test = { version = "0.2.5", features = ["no-env-filter"] }
+test-log = { version = "0.2.18", features = ["trace"] }

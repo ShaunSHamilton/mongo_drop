@@ -13,21 +13,83 @@
 //! ## Usage
 //!
 //! ```
-//! #[tokio::test]
-//! async fn test_mongo_drop() {
-//!     // Initialize MongoDB
-//!     let client = Client::with_uri_str("mongodb://localhost:27017").await.unwrap();
-//!     let database = client.database("test_db");
-//!     // Create a MongoDrop guard
-//!     let mongo_drop = MongoDrop::new(&database).await.unwrap();
+//! #[cfg(test)]
+//! mod tests {
+//!     use mongodb::{Client, options::ClientOptions};
+//!     use mongo_drop::MongoDrop;
 //!
-//!     // Perform database operations within the guard
-//!     let coll = database.collection("test_collection");
-//!     coll.insert_one(doc! { "key": "value" }).await.unwrap();
-//!     let record = coll.find_one(doc! {}).await.unwrap();
+//!     #[tokio::test]
+//!     async fn trivial_mongo_drop_insert() {
+//!         // Initialize MongoDB
+//!         let client = Client::with_uri_str("mongodb://localhost:27017").await.unwrap();
+//!         let database = client.database("mongo_drop_db");
+//!         let coll = database.collection("insert_collection");
+//!         {
+//!           // Create a MongoDrop guard
+//!           let _guard = MongoDrop::new(&database).await.unwrap();
 //!
-//!     assert_eq!(record, Some(doc! { "key": "value" }));
-//!     // The changes will be rolled back automatically when the guard goes out of scope
+//!           // Perform database operations within the guard
+//!           coll.insert_one(doc! { "key": "value" }).await.unwrap();
+//!           let record = coll.find_one(doc! {}).await.unwrap();
+//!
+//!           assert_eq!(record, Some(doc! { "key": "value" }));
+//!           // The changes will be rolled back automatically when the guard goes out of scope
+//!         }
+//!         // After the guard is dropped, verify that the changes were rolled back
+//!         let record = coll.find_one(doc! {}).await.unwrap();
+//!         assert_eq!(record, None);
+//!     }
+//!
+//!     #[tokio::test]
+//!     async fn deletes() -> Result<(), Box<dyn std::error::Error>> {
+//!         let mongodb_client = get_client().await?;
+//!
+//!         let database_name = "mongo_drop_db";
+//!         let db = mongodb_client.database(database_name);
+//!         let collection = create_collection(&db, "delete").await?;
+//!         // Insert a document to delete
+//!         let d = collection.insert_one(doc! { "value": "to_delete"}).await?;
+//!
+//!         {
+//!             let _guard = MongoDrop::new(&db).await?;
+//!
+//!             // Delete the document
+//!             collection.delete_one(doc! {"_id": &d.inserted_id}).await?;
+//!             // Verify deletion
+//!             let deleted_doc = collection.find_one(doc! {"_id": &d.inserted_id}).await?;
+//!             assert!(deleted_doc.is_none());
+//!         }
+//!
+//!         // After drop, verify document is restored
+//!         let deleted_doc = collection.find_one(doc! {"_id": &d.inserted_id}).await?;
+//!         assert!(deleted_doc.is_some());
+//!
+//!         Ok(())
+//!     }
+//!
+//!     async fn get_client() -> Result<Client, mongodb::error::Error> {
+//!         Client::with_uri_str("mongodb://127.0.0.1:27017/mongo_drop_db?directConnection=true").await
+//!     }
+//!
+//!     async fn create_collection(
+//!         db: &Database,
+//!         name: &str,
+//!     ) -> Result<mongodb::Collection<Document>, mongodb::error::Error> {
+//!         // Delete existing collection if it exists
+//!         let _ = db.collection::<Document>(name).drop().await;
+//!
+//!         // Delete, Update, and Replace operations require collections to be created with pre-images enabled
+//!         let options = mongodb::options::CreateCollectionOptions::builder()
+//!             .change_stream_pre_and_post_images(
+//!                 ChangeStreamPreAndPostImages::builder()
+//!                     .enabled(true)
+//!                     .build(),
+//!             )
+//!             .build();
+//!         let _ = db.create_collection(name).with_options(options).await?;
+//!         let collection = db.collection::<Document>(name);
+//!         Ok(collection)
+//!     }
 //! }
 //! ```
 
@@ -39,6 +101,7 @@ use mongodb::{
     Database,
     bson::{Document, doc},
     change_stream::event::{ChangeStreamEvent, OperationType},
+    options::FullDocumentBeforeChangeType,
 };
 use std::future::AsyncDrop;
 use std::pin::Pin;
@@ -69,7 +132,7 @@ impl MongoDrop {
         // Watch the database
         let stream = database
             .watch()
-            // .full_document_before_change(FullDocumentBeforeChangeType::Required)
+            .full_document_before_change(FullDocumentBeforeChangeType::WhenAvailable)
             .await?;
 
         let collected_events: Arc<Mutex<Vec<ChangeStreamEvent<Document>>>> =
@@ -198,7 +261,15 @@ impl AsyncDrop for MongoDrop {
                         let collection = this
                             .database
                             .collection::<Document>(event.ns.unwrap().coll.unwrap().as_str());
-                        if let Err(_e) = collection.insert_one(full_document).await {
+                        // UpdateOne operation is used, because InsertOne fails with _id_ duplicate index error
+                        if let Err(_e) = collection
+                            .update_one(
+                                doc! {"_id": full_document.get_object_id("_id").unwrap()},
+                                doc! {"$set": full_document},
+                            )
+                            .upsert(true)
+                            .await
+                        {
                             #[cfg(feature = "tracing")]
                             tracing::error!("Error undoing Delete: {:?}", _e);
                         }

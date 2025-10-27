@@ -6,6 +6,10 @@
 
 - impl of `AsyncDrop` now uses `drop`
 
+### Fixed
+
+- use `UpdateOne` operation for delete event to avoid duplicate `_id_` index error
+
 ## [0.1.1] - 2025-06-06
 
 ### Fixed
